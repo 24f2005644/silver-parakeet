@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import tempfile
 from copy import deepcopy
 from pathlib import Path
@@ -98,6 +99,14 @@ def _transcribe_audio(audio_bytes: bytes) -> str:
 	return text
 
 
+def _normalize_column_name(transcript: str) -> str:
+	cleaned = transcript.strip()
+	match = re.search(r"([가-힣]+)의", cleaned)
+	if match:
+		return match.group(1)
+	return cleaned.split()[0] if cleaned.split() else cleaned
+
+
 def _build_response(audio_id: str, transcript: str) -> dict[str, Any]:
 	response = deepcopy(RESPONSE_TEMPLATE)
 	response["rows"] = 1
@@ -111,7 +120,7 @@ def _build_response(audio_id: str, transcript: str) -> dict[str, Any]:
 @app.post("/analyze")
 def analyze_audio(payload: AudioRequest) -> dict[str, Any]:
 	audio_bytes = _decode_audio_bytes(payload.audio_base64)
-	transcript = _transcribe_audio(audio_bytes)
+	transcript = _normalize_column_name(_transcribe_audio(audio_bytes))
 	return _build_response(payload.audio_id, transcript)
 
 
@@ -123,5 +132,5 @@ def root() -> dict[str, str]:
 @app.post("/preview")
 def preview_audio(payload: AudioRequest) -> dict[str, Any]:
 	audio_bytes = _decode_audio_bytes(payload.audio_base64)
-	transcript = _transcribe_audio(audio_bytes)
+	transcript = _normalize_column_name(_transcribe_audio(audio_bytes))
 	return _build_response(payload.audio_id, transcript)
