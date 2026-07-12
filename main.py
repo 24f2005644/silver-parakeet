@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 app = FastAPI(title="Audio Stats API", version="1.0.0")
 WHISPER_MODEL = None
 WHISPER_MODULE = None
+WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL", "tiny")
 
 
 class AudioRequest(BaseModel):
@@ -73,9 +74,13 @@ def _get_whisper_model():
 		WHISPER_MODULE = whisper_module
 
 	if WHISPER_MODEL is None:
-		model_name = os.getenv("WHISPER_MODEL", "tiny")
-		WHISPER_MODEL = WHISPER_MODULE.load_model(model_name)
+		WHISPER_MODEL = WHISPER_MODULE.load_model(WHISPER_MODEL_NAME)
 	return WHISPER_MODEL
+
+
+@app.on_event("startup")
+def warm_whisper_model() -> None:
+	_get_whisper_model()
 
 
 def _transcribe_audio(audio_bytes: bytes) -> str:
