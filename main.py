@@ -130,14 +130,8 @@ def _to_numeric_korean_value(value: str) -> int | float | None:
 	return int(result) if result.is_integer() else result
 
 
-def _format_korean_value(value: int | float) -> str:
-	if value % 100000000 == 0:
-		return f"{int(value // 100000000)}억"
-	if value % 10000 == 0:
-		return f"{int(value // 10000)}만"
-	if float(value).is_integer():
-		return str(int(value))
-	return str(value)
+def _format_korean_value(value: int | float) -> int | float:
+	return int(value) if float(value).is_integer() else value
 
 
 def _build_response(audio_id: str, column_name: str, transcript: str) -> dict[str, Any]:
@@ -154,16 +148,16 @@ def _build_response(audio_id: str, column_name: str, transcript: str) -> dict[st
 		mean_numeric = (float(min_numeric) + float(max_numeric)) / 2
 		range_numeric = float(max_numeric) - float(min_numeric)
 	if min_value is not None:
-		response["min"] = {column_name: min_value}
+		response["min"] = {column_name: _format_korean_value(min_numeric) if min_numeric is not None else min_value}
 	if max_value is not None:
-		response["max"] = {column_name: max_value}
+		response["max"] = {column_name: _format_korean_value(max_numeric) if max_numeric is not None else max_value}
 	if mean_numeric is not None:
 		response["mean"] = {column_name: _format_korean_value(mean_numeric)}
 		response["median"] = {column_name: _format_korean_value(mean_numeric)}
 	if range_numeric is not None:
 		response["range"] = {column_name: _format_korean_value(range_numeric)}
 	if max_value is not None:
-		response["mode"] = {column_name: max_value}
+		response["mode"] = {column_name: _format_korean_value(max_numeric) if max_numeric is not None else max_value}
 	response["allowed_values"] = {}
 	response["value_range"] = {"audio_id": audio_id}
 	return response
