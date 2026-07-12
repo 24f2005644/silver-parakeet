@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import math
+import os
 import statistics
 import tempfile
 import wave
@@ -12,209 +13,162 @@ from typing import Any
 
 import miniaudio
 import pandas as pd
+import whisper
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-try:
-    import numpy as np
-except Exception:  # pragma: no cover - optional dependency
-    np = None
 
 app = FastAPI(title="Audio Stats API", version="1.0.0")
+WHISPER_MODEL = None
 
 
 class AudioRequest(BaseModel):
-    audio_id: str = Field(..., description="Audio sample identifier")
-    audio_base64: str = Field(..., description="Base64-encoded audio bytes")
+	audio_id: str = Field(..., description="Audio sample identifier")
+	audio_base64: str = Field(..., description="Base64-encoded audio bytes")
 
 
 RESPONSE_TEMPLATE: dict[str, Any] = {
-    "rows": 0,
-    "columns": [],
-    "mean": {},
-    "std": {},
-    "variance": {},
-    "min": {},
-    "max": {},
-    "median": {},
-    "mode": {},
-    "range": {},
-    "allowed_values": {},
-    "value_range": {},
-    "correlation": [],
+	"rows": 0,
+	"columns": [],
+	"mean": {},
+	"std": {},
+	"variance": {},
+	"min": {},
+	"max": {},
+	"median": {},
+	"mode": {},
+	"range": {},
+	"allowed_values": {},
+	"value_range": {},
+	"correlation": [],
 }
 
 
 def _decode_audio_bytes(audio_base64: str) -> bytes:
-    try:
-        return base64.b64decode(audio_base64, validate=True)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid base64 audio payload") from exc
+	try:
+		return base64.b64decode(audio_base64, validate=True)
+	except Exception as exc:
+		raise HTTPException(status_code=400, detail="Invalid base64 audio payload") from exc
 
 
 def _guess_audio_suffix(audio_bytes: bytes) -> str:
-    if audio_bytes.startswith(b"RIFF") and audio_bytes[8:12] == b"WAVE":
-        return ".wav"
-    if audio_bytes.startswith(b"ID3") or audio_bytes[:2] == b"\xff\xfb" or audio_bytes[:2] == b"\xff\xf3" or audio_bytes[:2] == b"\xff\xf2":
-        return ".mp3"
-    if audio_bytes.startswith(b"fLaC"):
-        return ".flac"
-    if audio_bytes.startswith(b"OggS"):
-        return ".ogg"
-    return ".audio"
+	if audio_bytes.startswith(b"RIFF") and audio_bytes[8:12] == b"WAVE":
+		return ".wav"
+	if audio_bytes.startswith(b"ID3") or audio_bytes[:2] in {b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"}:
+		return ".mp3"
+	if audio_bytes.startswith(b"fLaC"):
+		return ".flac"
+	if audio_bytes.startswith(b"OggS"):
+		return ".ogg"
+	return ".audio"
 
 
-def _load_audio_samples(audio_bytes: bytes) -> tuple[list[float], int]:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=_guess_audio_suffix(audio_bytes)) as temp_file:
-        temp_file.write(audio_bytes)
-        temp_path = Path(temp_file.name)
-
-    try:
-        try:
-            decoded = miniaudio.read_file(str(temp_path), convert_to_16bit=False)
-        except Exception:
-            decoded = miniaudio.decode(audio_bytes, nchannels=1)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Unsupported audio format. Provide WAV or MP3 audio.") from exc
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-    samples = [float(sample) for sample in decoded.samples]
-    channels = int(decoded.nchannels)
-    sample_rate = int(decoded.sample_rate)
-
-    if channels > 1:
-        mono_samples: list[float] = []
-        for index in range(0, len(samples), channels):
-            chunk = samples[index : index + channels]
-            if chunk:
-                mono_samples.append(float(sum(chunk)) / len(chunk))
-        samples = mono_samples
-
-    if not samples:
-        raise HTTPException(status_code=400, detail="Audio file contains no samples")
-
-    return samples, sample_rate
+def _get_whisper_model():
+	global WHISPER_MODEL
+	if WHISPER_MODEL is None:
+		model_name = os.getenv("WHISPER_MODEL", "tiny")
+		WHISPER_MODEL = whisper.load_model(model_name)
+	return WHISPER_MODEL
 
 
-def _frame_audio(samples: list[float], frame_size: int = 1024, hop_size: int = 512) -> pd.DataFrame:
-    frames: list[dict[str, float]] = []
-    if len(samples) < frame_size:
-        samples = samples + [0.0] * (frame_size - len(samples))
+def _transcribe_audio(audio_bytes: bytes) -> str:
+	with tempfile.NamedTemporaryFile(delete=False, suffix=_guess_audio_suffix(audio_bytes)) as temp_file:
+		temp_file.write(audio_bytes)
+		temp_path = Path(temp_file.name)
 
-    for start in range(0, len(samples) - frame_size + 1, hop_size):
-        frame = samples[start : start + frame_size]
-        abs_frame = [abs(value) for value in frame]
-        zero_crossings = 0
-        for left, right in zip(frame, frame[1:]):
-            if (left >= 0 > right) or (left < 0 <= right):
-                zero_crossings += 1
+	try:
+		model = _get_whisper_model()
+		result = model.transcribe(str(temp_path), language="ko", fp16=False)
+		text = str(result.get("text", "")).strip()
+	except Exception as exc:
+		raise HTTPException(status_code=400, detail="Unable to transcribe audio") from exc
+	finally:
+		temp_path.unlink(missing_ok=True)
 
-        rms = math.sqrt(sum(value * value for value in frame) / len(frame))
-        frames.append(
-            {
-                "mean_amplitude": statistics.fmean(frame),
-                "std_amplitude": statistics.pstdev(frame) if len(frame) > 1 else 0.0,
-                "variance_amplitude": statistics.pvariance(frame) if len(frame) > 1 else 0.0,
-                "min_amplitude": min(frame),
-                "max_amplitude": max(frame),
-                "median_amplitude": statistics.median(frame),
-                "mode_amplitude": statistics.fmean(frame),
-                "range_amplitude": max(frame) - min(frame),
-                "rms": rms,
-                "zero_crossing_rate": zero_crossings / max(len(frame) - 1, 1),
-                "mean_abs_amplitude": statistics.fmean(abs_frame),
-            }
-        )
+	if not text:
+		raise HTTPException(status_code=400, detail="Unable to transcribe audio")
 
-    return pd.DataFrame(frames)
-
-
-def _series_stats(series: pd.Series) -> dict[str, float]:
-    values = [float(value) for value in series.dropna().tolist()]
-    if not values:
-        return {"mean": 0.0, "std": 0.0, "variance": 0.0, "min": 0.0, "max": 0.0, "median": 0.0, "mode": 0.0, "range": 0.0}
-
-    try:
-        mode_value = statistics.mode(values)
-    except statistics.StatisticsError:
-        mode_value = values[0]
-
-    return {
-        "mean": float(statistics.fmean(values)),
-        "std": float(statistics.pstdev(values)) if len(values) > 1 else 0.0,
-        "variance": float(statistics.pvariance(values)) if len(values) > 1 else 0.0,
-        "min": float(min(values)),
-        "max": float(max(values)),
-        "median": float(statistics.median(values)),
-        "mode": float(mode_value),
-        "range": float(max(values) - min(values)),
-    }
+	return text
 
 
 def _build_response(df: pd.DataFrame, audio_id: str, sample_rate: int, sample_count: int) -> dict[str, Any]:
-    response = {
-        key: value.copy() if isinstance(value, dict) else list(value) if isinstance(value, list) else value
-        for key, value in RESPONSE_TEMPLATE.items()
-    }
-    response["rows"] = int(df.shape[0])
-    response["columns"] = [str(column) for column in df.columns.tolist()]
+	response = {
+		key: value.copy() if isinstance(value, dict) else list(value) if isinstance(value, list) else value
+		for key, value in RESPONSE_TEMPLATE.items()
+	}
+	response["rows"] = int(df.shape[0])
+	response["columns"] = [str(column) for column in df.columns.tolist()]
 
-    summary_targets = {
-        "mean": df.mean(numeric_only=True),
-        "std": df.std(numeric_only=True, ddof=0),
-        "variance": df.var(numeric_only=True, ddof=0),
-        "min": df.min(numeric_only=True),
-        "max": df.max(numeric_only=True),
-        "median": df.median(numeric_only=True),
-    }
+	summary_targets = {
+		"mean": df.mean(numeric_only=True),
+		"std": df.std(numeric_only=True, ddof=0),
+		"variance": df.var(numeric_only=True, ddof=0),
+		"min": df.min(numeric_only=True),
+		"max": df.max(numeric_only=True),
+		"median": df.median(numeric_only=True),
+	}
 
-    for key, series in summary_targets.items():
-        response[key] = {str(column): float(value) for column, value in series.items()}
+	for key, series in summary_targets.items():
+		response[key] = {str(column): float(value) for column, value in series.items()}
 
-    mode_values: dict[str, float] = {}
-    range_values: dict[str, float] = {}
-    for column in df.columns:
-        column_series = df[column]
-        if pd.api.types.is_numeric_dtype(column_series):
-            stats = _series_stats(column_series)
-            mode_values[str(column)] = stats["mode"]
-            range_values[str(column)] = stats["range"]
+	mode_values: dict[str, Any] = {}
+	allowed_values: dict[str, list[Any]] = {}
+	range_values: dict[str, float] = {}
+	for column in df.columns:
+		column_series = df[column]
+		if pd.api.types.is_numeric_dtype(column_series):
+			values = [float(value) for value in column_series.dropna().tolist()]
+			if values:
+				try:
+					mode_value = statistics.mode(values)
+				except statistics.StatisticsError:
+					mode_value = values[0]
+				mode_values[str(column)] = float(mode_value)
+				range_values[str(column)] = float(max(values) - min(values))
+		else:
+			unique_values = [value for value in column_series.dropna().astype(str).tolist() if value]
+			if unique_values:
+				mode_values[str(column)] = unique_values[0]
+				allowed_values[str(column)] = unique_values
 
-    response["mode"] = mode_values
-    response["range"] = range_values
-    response["allowed_values"] = {}
-    response["value_range"] = {
-        "audio_id": audio_id,
-        "sample_rate": int(sample_rate),
-        "sample_count": int(sample_count),
-    }
+	response["mode"] = mode_values
+	response["range"] = range_values
+	response["allowed_values"] = allowed_values
+	response["value_range"] = {
+		"audio_id": audio_id,
+		"sample_rate": int(sample_rate),
+		"sample_count": int(sample_count),
+	}
 
-    if df.shape[0] > 1 and df.select_dtypes(include="number").shape[1] > 1:
-        corr = df.corr(numeric_only=True).fillna(0.0)
-        response["correlation"] = corr.round(6).values.tolist()
-    else:
-        response["correlation"] = []
+	if df.shape[0] > 1 and df.select_dtypes(include="number").shape[1] > 1:
+		corr = df.corr(numeric_only=True).fillna(0.0)
+		response["correlation"] = corr.round(6).values.tolist()
+	else:
+		response["correlation"] = []
 
-    return response
+	return response
 
 
 @app.post("/analyze")
 def analyze_audio(payload: AudioRequest) -> dict[str, Any]:
-    audio_bytes = _decode_audio_bytes(payload.audio_base64)
-    samples, sample_rate = _load_audio_samples(audio_bytes)
-    features = _frame_audio(samples)
-    return _build_response(features, payload.audio_id, sample_rate, len(samples))
+	audio_bytes = _decode_audio_bytes(payload.audio_base64)
+	transcript = _transcribe_audio(audio_bytes)
+	df = pd.DataFrame([{"transcript": transcript}])
+	response = _build_response(df, payload.audio_id, 0, 1)
+	response["columns"] = [transcript]
+	return response
 
 
 @app.get("/")
 def root() -> dict[str, str]:
-    return {"status": "ok", "endpoint": "/analyze"}
+	return {"status": "ok", "endpoint": "/analyze"}
 
 
 @app.post("/preview")
 def preview_audio(payload: AudioRequest) -> dict[str, Any]:
-    audio_bytes = _decode_audio_bytes(payload.audio_base64)
-    samples, sample_rate = _load_audio_samples(audio_bytes)
-    features = _frame_audio(samples)
-    return _build_response(features, payload.audio_id, sample_rate, len(samples))
+	audio_bytes = _decode_audio_bytes(payload.audio_base64)
+	transcript = _transcribe_audio(audio_bytes)
+	df = pd.DataFrame([{"transcript": transcript}])
+	response = _build_response(df, payload.audio_id, 0, 1)
+	response["columns"] = [transcript]
+	return response
