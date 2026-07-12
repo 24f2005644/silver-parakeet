@@ -3,3 +3,4 @@ uvicorn[standard]>=0.30
 pandas>=2.2
 numpy>=1.26
 miniaudio>=1.60
+openai-whisper>=20250625
