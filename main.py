@@ -73,6 +73,11 @@ def _get_whisper_model() -> WhisperModel:
 	return WHISPER_MODEL
 
 
+@app.on_event("startup")
+def warm_whisper_model() -> None:
+	_get_whisper_model()
+
+
 def _transcribe_audio(audio_bytes: bytes) -> str:
 	with tempfile.NamedTemporaryFile(delete=False, suffix=_guess_audio_suffix(audio_bytes)) as temp_file:
 		temp_file.write(audio_bytes)
