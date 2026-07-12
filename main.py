@@ -10,6 +10,7 @@ from array import array
 from pathlib import Path
 from typing import Any
 
+import miniaudio
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -51,40 +52,49 @@ def _decode_audio_bytes(audio_base64: str) -> bytes:
         raise HTTPException(status_code=400, detail="Invalid base64 audio payload") from exc
 
 
-def _load_wav_samples(audio_bytes: bytes) -> tuple[list[float], int]:
+def _guess_audio_suffix(audio_bytes: bytes) -> str:
+    if audio_bytes.startswith(b"RIFF") and audio_bytes[8:12] == b"WAVE":
+        return ".wav"
+    if audio_bytes.startswith(b"ID3") or audio_bytes[:2] == b"\xff\xfb" or audio_bytes[:2] == b"\xff\xf3" or audio_bytes[:2] == b"\xff\xf2":
+        return ".mp3"
+    if audio_bytes.startswith(b"fLaC"):
+        return ".flac"
+    if audio_bytes.startswith(b"OggS"):
+        return ".ogg"
+    return ".audio"
+
+
+def _load_audio_samples(audio_bytes: bytes) -> tuple[list[float], int]:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=_guess_audio_suffix(audio_bytes)) as temp_file:
+        temp_file.write(audio_bytes)
+        temp_path = Path(temp_file.name)
+
     try:
-        with wave.open(io.BytesIO(audio_bytes), "rb") as wav_file:
-            frame_count = wav_file.getnframes()
-            channels = wav_file.getnchannels()
-            sample_width = wav_file.getsampwidth()
-            sample_rate = wav_file.getframerate()
-            raw_frames = wav_file.readframes(frame_count)
-    except wave.Error as exc:
-        raise HTTPException(status_code=400, detail="Unsupported audio format. Provide WAV audio.") from exc
+        try:
+            decoded = miniaudio.read_file(str(temp_path), convert_to_16bit=False)
+        except Exception:
+            decoded = miniaudio.decode(audio_bytes, nchannels=1)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Unsupported audio format. Provide WAV or MP3 audio.") from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
 
-    if sample_width == 1:
-        samples = array("b", raw_frames)
-    elif sample_width == 2:
-        samples = array("h")
-        samples.frombytes(raw_frames)
-    elif sample_width == 4:
-        samples = array("i")
-        samples.frombytes(raw_frames)
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported sample width: {sample_width}")
+    samples = [float(sample) for sample in decoded.samples]
+    channels = int(decoded.nchannels)
+    sample_rate = int(decoded.sample_rate)
 
-    float_samples: list[float] = []
-    if channels <= 1:
-        float_samples = [float(sample) for sample in samples]
-    else:
+    if channels > 1:
+        mono_samples: list[float] = []
         for index in range(0, len(samples), channels):
             chunk = samples[index : index + channels]
-            float_samples.append(float(sum(chunk)) / len(chunk))
+            if chunk:
+                mono_samples.append(float(sum(chunk)) / len(chunk))
+        samples = mono_samples
 
-    if not float_samples:
+    if not samples:
         raise HTTPException(status_code=400, detail="Audio file contains no samples")
 
-    return float_samples, sample_rate
+    return samples, sample_rate
 
 
 def _frame_audio(samples: list[float], frame_size: int = 1024, hop_size: int = 512) -> pd.DataFrame:
@@ -192,7 +202,7 @@ def _build_response(df: pd.DataFrame, audio_id: str, sample_rate: int, sample_co
 @app.post("/analyze")
 def analyze_audio(payload: AudioRequest) -> dict[str, Any]:
     audio_bytes = _decode_audio_bytes(payload.audio_base64)
-    samples, sample_rate = _load_wav_samples(audio_bytes)
+    samples, sample_rate = _load_audio_samples(audio_bytes)
     features = _frame_audio(samples)
     return _build_response(features, payload.audio_id, sample_rate, len(samples))
 
@@ -205,13 +215,6 @@ def root() -> dict[str, str]:
 @app.post("/preview")
 def preview_audio(payload: AudioRequest) -> dict[str, Any]:
     audio_bytes = _decode_audio_bytes(payload.audio_base64)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
-        temp_file.write(audio_bytes)
-        temp_path = Path(temp_file.name)
-
-    try:
-        samples, sample_rate = _load_wav_samples(temp_path.read_bytes())
-        features = _frame_audio(samples)
-        return _build_response(features, payload.audio_id, sample_rate, len(samples))
-    finally:
-        temp_path.unlink(missing_ok=True)
+    samples, sample_rate = _load_audio_samples(audio_bytes)
+    features = _frame_audio(samples)
+    return _build_response(features, payload.audio_id, sample_rate, len(samples))
