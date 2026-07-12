@@ -103,7 +103,7 @@ def _build_response(audio_id: str, transcript: str) -> dict[str, Any]:
 	response["rows"] = 1
 	response["columns"] = [transcript]
 	response["mode"] = {"transcript": transcript}
-	response["allowed_values"] = {"transcript": [transcript]}
+	response["allowed_values"] = {}
 	response["value_range"] = {"audio_id": audio_id}
 	return response
 
