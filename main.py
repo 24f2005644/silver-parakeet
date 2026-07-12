@@ -13,13 +13,13 @@ from typing import Any
 
 import miniaudio
 import pandas as pd
-import whisper
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 
 app = FastAPI(title="Audio Stats API", version="1.0.0")
 WHISPER_MODEL = None
+WHISPER_MODULE = None
 
 
 class AudioRequest(BaseModel):
@@ -64,10 +64,17 @@ def _guess_audio_suffix(audio_bytes: bytes) -> str:
 
 
 def _get_whisper_model():
-	global WHISPER_MODEL
+	global WHISPER_MODEL, WHISPER_MODULE
+	if WHISPER_MODULE is None:
+		try:
+			import whisper as whisper_module
+		except Exception as exc:
+			raise HTTPException(status_code=503, detail="Transcription dependency is unavailable") from exc
+		WHISPER_MODULE = whisper_module
+
 	if WHISPER_MODEL is None:
 		model_name = os.getenv("WHISPER_MODEL", "tiny")
-		WHISPER_MODEL = whisper.load_model(model_name)
+		WHISPER_MODEL = WHISPER_MODULE.load_model(model_name)
 	return WHISPER_MODEL
 
 
