@@ -107,11 +107,63 @@ def _normalize_column_name(transcript: str) -> str:
 	return cleaned.split()[0] if cleaned.split() else cleaned
 
 
-def _build_response(audio_id: str, transcript: str) -> dict[str, Any]:
+def _extract_bounded_value(transcript: str, label: str) -> str | None:
+	pattern = rf"{label}[^0-9]*([0-9]+(?:\.[0-9]+)?(?:만|억)?)"
+	match = re.search(pattern, transcript)
+	if match:
+		return match.group(1)
+	return None
+
+
+def _to_numeric_korean_value(value: str) -> int | float | None:
+	match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(만|억)?", value)
+	if not match:
+		return None
+	number = float(match.group(1))
+	unit = match.group(2)
+	multiplier = 1
+	if unit == "만":
+		multiplier = 10000
+	elif unit == "억":
+		multiplier = 100000000
+	result = number * multiplier
+	return int(result) if result.is_integer() else result
+
+
+def _format_korean_value(value: int | float) -> str:
+	if value % 100000000 == 0:
+		return f"{int(value // 100000000)}억"
+	if value % 10000 == 0:
+		return f"{int(value // 10000)}만"
+	if float(value).is_integer():
+		return str(int(value))
+	return str(value)
+
+
+def _build_response(audio_id: str, column_name: str, transcript: str) -> dict[str, Any]:
 	response = deepcopy(RESPONSE_TEMPLATE)
 	response["rows"] = 1
-	response["columns"] = [transcript]
-	response["mode"] = {"transcript": transcript}
+	response["columns"] = [column_name]
+	min_value = _extract_bounded_value(transcript, "최소값은")
+	max_value = _extract_bounded_value(transcript, "최대값은")
+	min_numeric = _to_numeric_korean_value(min_value) if min_value is not None else None
+	max_numeric = _to_numeric_korean_value(max_value) if max_value is not None else None
+	mean_numeric = None
+	range_numeric = None
+	if min_numeric is not None and max_numeric is not None:
+		mean_numeric = (float(min_numeric) + float(max_numeric)) / 2
+		range_numeric = float(max_numeric) - float(min_numeric)
+	if min_value is not None:
+		response["min"] = {column_name: min_value}
+	if max_value is not None:
+		response["max"] = {column_name: max_value}
+	if mean_numeric is not None:
+		response["mean"] = {column_name: _format_korean_value(mean_numeric)}
+		response["median"] = {column_name: _format_korean_value(mean_numeric)}
+	if range_numeric is not None:
+		response["range"] = {column_name: _format_korean_value(range_numeric)}
+	if max_value is not None:
+		response["mode"] = {column_name: max_value}
 	response["allowed_values"] = {}
 	response["value_range"] = {"audio_id": audio_id}
 	return response
@@ -120,8 +172,9 @@ def _build_response(audio_id: str, transcript: str) -> dict[str, Any]:
 @app.post("/analyze")
 def analyze_audio(payload: AudioRequest) -> dict[str, Any]:
 	audio_bytes = _decode_audio_bytes(payload.audio_base64)
-	transcript = _normalize_column_name(_transcribe_audio(audio_bytes))
-	return _build_response(payload.audio_id, transcript)
+	full_transcript = _transcribe_audio(audio_bytes)
+	column_name = _normalize_column_name(full_transcript)
+	return _build_response(payload.audio_id, column_name, full_transcript)
 
 
 @app.get("/")
@@ -132,5 +185,6 @@ def root() -> dict[str, str]:
 @app.post("/preview")
 def preview_audio(payload: AudioRequest) -> dict[str, Any]:
 	audio_bytes = _decode_audio_bytes(payload.audio_base64)
-	transcript = _normalize_column_name(_transcribe_audio(audio_bytes))
-	return _build_response(payload.audio_id, transcript)
+	full_transcript = _transcribe_audio(audio_bytes)
+	column_name = _normalize_column_name(full_transcript)
+	return _build_response(payload.audio_id, column_name, full_transcript)
